@@ -8,7 +8,7 @@ An enhanced fork of [asimons81/hermes-desktop-achievements](https://github.com/a
 
 ## Features
 
-- **Unlock notifications** — toast, haptic, and a chime the moment a new badge lands, no page visit required
+- **Unlock notifications** — toast, haptic, a chime, and a confetti burst the moment a new badge lands, no page visit required
 - **Score header** — unlocked/total, discovered/secret counts, scan freshness, one-click **Rescan**
 - **Next up strip** — the locked achievements closest to unlocking, with progress bars and next-tier thresholds
 - **Per-session context** — badges earned in the active session, right on the page

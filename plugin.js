@@ -3,8 +3,8 @@
  *
  * Fork of asimons81/hermes-desktop-achievements (MIT) by Tony Simons.
  * Extensions on top of the original:
- *   - Unlock notifications: toast + haptic + chime the moment a new badge
- *     lands (poll diff against a persisted known set).
+ *   - Unlock notifications: toast + haptic + chime + confetti the moment a
+ *     new badge lands (poll diff against a persisted known set).
  *   - "Next up" strip: the locked achievements closest to unlocking.
  *   - Per-session context: badges earned in the active session.
  *   - Share cards: 1200×630 canvas PNG export per unlocked badge.
@@ -101,6 +101,99 @@ function playChime() {
   }
 }
 
+function lighten(hex, amt) {
+  try {
+    const m = /^#?([0-9a-f]{6})$/i.exec(String(hex))
+    if (!m) return hex
+    const n = parseInt(m[1], 16)
+    const f = c => Math.max(0, Math.min(255, Math.round(c + 255 * amt)))
+    const r = f((n >> 16) & 255)
+    const g = f((n >> 8) & 255)
+    const b = f(n & 255)
+    return `rgb(${r},${g},${b})`
+  } catch (e) {
+    return hex
+  }
+}
+
+let _confettiCanvas = null
+let _confettiRaf = null
+
+function spawnConfetti() {
+  try {
+    if (_confettiCanvas) return // one burst at a time
+    const canvas = document.createElement('canvas')
+    canvas.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:9999'
+    canvas.width = window.innerWidth * window.devicePixelRatio
+    canvas.height = window.innerHeight * window.devicePixelRatio
+    document.body.appendChild(canvas)
+    const ctx = canvas.getContext('2d')
+    ctx.scale(window.devicePixelRatio, window.devicePixelRatio)
+
+    const cs = getComputedStyle(document.body)
+    const get = v => cs.getPropertyValue(v).trim() || null
+    const accent = get('--ui-accent') || '#7B2D8E'
+    const palette = [
+      accent,
+      lighten(accent, 0.35),
+      lighten(accent, -0.25),
+      get('--ui-text-primary') || '#ffffff',
+      get('--ui-text-secondary') || '#b0b0b0'
+    ]
+
+    const W = window.innerWidth
+    const H = window.innerHeight
+    const parts = Array.from({ length: 150 }, () => ({
+      x: W * (0.15 + Math.random() * 0.7),
+      y: -20 - Math.random() * H * 0.5,
+      w: 6 + Math.random() * 6,
+      h: 10 + Math.random() * 8,
+      vx: (Math.random() - 0.5) * 2.4,
+      vy: 2.2 + Math.random() * 3.6,
+      rot: Math.random() * Math.PI * 2,
+      vr: (Math.random() - 0.5) * 0.25,
+      color: palette[(Math.random() * palette.length) | 0],
+      sway: Math.random() * Math.PI * 2,
+      swaySpeed: 0.02 + Math.random() * 0.04
+    }))
+
+    const start = performance.now()
+    const DURATION = 3200
+
+    const tick = now => {
+      const elapsed = now - start
+      const t = Math.min(1, elapsed / DURATION)
+      ctx.clearRect(0, 0, W, H)
+      ctx.globalAlpha = 1 - t * t
+      for (const p of parts) {
+        p.sway += p.swaySpeed
+        p.x += p.vx + Math.sin(p.sway) * 0.8
+        p.y += p.vy
+        p.rot += p.vr
+        ctx.save()
+        ctx.translate(p.x, p.y)
+        ctx.rotate(p.rot)
+        ctx.fillStyle = p.color
+        ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h)
+        ctx.restore()
+      }
+      if (t < 1) {
+        _confettiRaf = requestAnimationFrame(tick)
+      } else {
+        ctx.clearRect(0, 0, W, H)
+        canvas.remove()
+        _confettiCanvas = null
+        _confettiRaf = null
+      }
+    }
+
+    _confettiCanvas = canvas
+    _confettiRaf = requestAnimationFrame(tick)
+  } catch (e) {
+    /* confetti unavailable — ignore */
+  }
+}
+
 function notifyUnlock(a) {
   try {
     haptic('tap')
@@ -108,6 +201,7 @@ function notifyUnlock(a) {
     /* ignore */
   }
   playChime()
+  spawnConfetti()
   const tier = a.tier ? ` [${a.tier}]` : ''
   host.notify({ kind: 'success', message: `Achievement unlocked: ${a.name}${tier}` })
 }
@@ -739,7 +833,7 @@ export default {
   id: ID,
   name: 'Achievements',
   description:
-    'Hermes achievement badges — collectible tiers from real session history. Read-only dashboard backed by the hermes-achievements plugin API, with unlock notifications, next-up tracking, per-session context, and share cards.',
+    'Hermes achievement badges — collectible tiers from real session history. Read-only dashboard backed by the hermes-achievements plugin API, with unlock notifications, confetti celebrations, next-up tracking, per-session context, and share cards.',
   defaultEnabled: true,
   register(ctx) {
     rest = ctx.rest
