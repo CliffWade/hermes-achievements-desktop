@@ -5,10 +5,16 @@
  * Extensions on top of the original:
  *   - Unlock notifications: toast + haptic + chime + theme/tier-colored
  *     confetti the moment a new badge lands (poll diff against a persisted
- *     known set).
- *   - "Next up" strip: the locked achievements closest to unlocking.
- *   - Per-session context: badges earned in the active session.
- *   - Share cards: 1200×630 canvas PNG export per unlocked badge.
+ *     known set), gated by user settings.
+ *   - Unlock history timeline (recent unlocks with dates and evidence).
+ *   - Custom achievements: user-defined personal badges, stored in plugin
+ *     storage, celebrated on completion.
+ *   - Settings panel: toggles for confetti, sound, haptic.
+ *   - "NEW" freshness tag on unlocks from the last 48 hours.
+ *   - Search and sort on the grid.
+ *   - Milestone celebrations at every 10 unlocks.
+ *   - Smarter statusbar chip tooltip (closest next-up achievement).
+ *   - "Next up" strip, per-session context, share cards.
  *
  * Backed by the existing hermes-achievements dashboard plugin API
  * (mounted at /api/plugins/hermes-achievements/). Plain ESM loaded
@@ -37,16 +43,20 @@ import {
   useValue
 } from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 const ID = 'hermes-achievements'
 
 // Assigned in register(ctx) — components can't see ctx directly.
 let rest
+let storageRef = null
 
 const TIER_ORDER = ['Copper', 'Silver', 'Gold', 'Diamond', 'Olympian']
-const FILTERS = ['all', 'unlocked', 'discovered', 'secret']
+const FILTERS = ['all', 'unlocked', 'discovered', 'secret', 'history', 'custom']
 const UNLOCK_POLL_MS = 15_000
+
+const DEFAULT_SETTINGS = { confetti: true, sound: true, haptic: true }
+let _settings = { ...DEFAULT_SETTINGS }
 
 function tierIndex(tier) {
   return tier ? TIER_ORDER.indexOf(tier) : -1
@@ -72,11 +82,8 @@ function progressBarClass(state) {
   return 'bg-(--ui-text-tertiary)'
 }
 
-// ── Unlock watcher ─────────────────────────────────────────────────────────
+// ── Celebration: chime + haptic + confetti (settings-gated) ────────────────
 
-let _known = new Map() // id -> { id, name, tier, unlocked_at }
-let _baselineSet = false
-let _watcherTimer = null
 let _audioCtx = null
 
 function playChime() {
@@ -141,9 +148,10 @@ function drawStar(ctx, cx, cy, spikes, outer, inner) {
   ctx.closePath()
 }
 
-function spawnConfetti(a) {
+function spawnConfetti(a, opts) {
   try {
     if (_confettiCanvas) return // one burst at a time
+    const isMilestone = !!(opts && opts.milestone)
     const canvas = document.createElement('canvas')
     canvas.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:9999'
     canvas.width = window.innerWidth * window.devicePixelRatio
@@ -169,12 +177,14 @@ function spawnConfetti(a) {
     const W = window.innerWidth
     const H = window.innerHeight
     const SHAPES = ['rect', 'rect', 'rect', 'circle', 'triangle', 'star']
-    const count = 120 + Math.floor(Math.random() * 80)
+    const count = isMilestone
+      ? 260 + Math.floor(Math.random() * 60)
+      : 120 + Math.floor(Math.random() * 80)
+    const DURATION = isMilestone ? 5000 : 3200
     const wind = (Math.random() - 0.5) * 1.4
     const parts = Array.from({ length: count }, () => {
-      // Mostly theme/tier colors, sprinkled with random bright hues.
       const color =
-        Math.random() < 0.25
+        Math.random() < (isMilestone ? 0.4 : 0.25)
           ? `hsl(${Math.floor(Math.random() * 360)}, 85%, 62%)`
           : base[(Math.random() * base.length) | 0]
       return {
@@ -194,7 +204,6 @@ function spawnConfetti(a) {
     })
 
     const start = performance.now()
-    const DURATION = 3200
 
     const drawShape = p => {
       if (p.shape === 'circle') {
@@ -250,14 +259,28 @@ function spawnConfetti(a) {
   }
 }
 
-function notifyUnlock(a) {
-  try {
-    haptic('tap')
-  } catch (e) {
-    /* ignore */
+function celebrate(a, opts) {
+  const s = _settings
+  if (s.haptic) {
+    try {
+      haptic('tap')
+    } catch (e) {
+      /* ignore */
+    }
   }
-  playChime()
-  spawnConfetti(a)
+  if (s.sound) playChime()
+  if (s.confetti) spawnConfetti(a, opts)
+}
+
+// ── Unlock watcher ─────────────────────────────────────────────────────────
+
+let _known = new Map() // id -> { id, name, tier, unlocked_at }
+let _baselineSet = false
+let _watcherTimer = null
+let _lastTotal = null
+
+function notifyUnlock(a) {
+  celebrate(a)
   const tier = a.tier ? ` [${a.tier}]` : ''
   host.notify({ kind: 'success', message: `Achievement unlocked: ${a.name}${tier}` })
 }
@@ -266,6 +289,8 @@ async function refreshUnlocks(ctx) {
   try {
     const data = await ctx.rest('/achievements', { timeoutMs: 8000 })
     const unlocked = (data?.achievements || []).filter(a => a.unlocked)
+    const totalNow = unlocked.length
+
     if (!_baselineSet) {
       // First fetch: seed from storage so restarts don't re-toast old unlocks.
       let stored = []
@@ -281,6 +306,7 @@ async function refreshUnlocks(ctx) {
         }
       }
       _baselineSet = true
+      _lastTotal = totalNow
       try {
         await ctx.storage.set('knownUnlocks', Array.from(_known.values()))
       } catch (e) {
@@ -288,6 +314,7 @@ async function refreshUnlocks(ctx) {
       }
       return
     }
+
     let changed = false
     for (const a of unlocked) {
       if (!_known.has(a.id)) {
@@ -296,6 +323,14 @@ async function refreshUnlocks(ctx) {
         changed = true
       }
     }
+
+    // Milestone: crossing a multiple of 10 unlocks gets a bigger party.
+    if (_lastTotal !== null && totalNow > _lastTotal && totalNow % 10 === 0) {
+      celebrate({ name: `${totalNow} achievements`, tier: null }, { milestone: true })
+      host.notify({ kind: 'success', message: `Milestone: ${totalNow} achievements unlocked!` })
+    }
+    _lastTotal = totalNow
+
     if (changed) {
       try {
         await ctx.storage.set('knownUnlocks', Array.from(_known.values()))
@@ -313,6 +348,367 @@ function startUnlockWatcher(ctx) {
   if (_watcherTimer) clearInterval(_watcherTimer)
   refreshUnlocks(ctx)
   _watcherTimer = setInterval(() => refreshUnlocks(ctx), UNLOCK_POLL_MS)
+}
+
+// ── Custom achievements ─────────────────────────────────────────────────────
+
+function useCustomAchievements() {
+  const [items, setItems] = useState(null)
+
+  const refresh = useCallback(() => {
+    let mounted = true
+    ;(async () => {
+      try {
+        const stored = (await storageRef.get('customAchievements')) || []
+        if (mounted) setItems(stored)
+      } catch (e) {
+        if (mounted) setItems([])
+      }
+    })()
+    return () => {
+      mounted = false
+    }
+  }, [])
+
+  useEffect(refresh, [refresh])
+
+  const persist = async next => {
+    setItems(next)
+    try {
+      await storageRef.set('customAchievements', next)
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
+  const add = async (name, description) => {
+    if (!name || !name.trim()) return
+    const item = {
+      id: 'custom-' + Date.now(),
+      name: name.trim(),
+      description: (description || '').trim(),
+      completed: false,
+      completedAt: null
+    }
+    await persist([...(items || []), item])
+  }
+
+  const remove = async id => {
+    await persist((items || []).filter(i => i.id !== id))
+  }
+
+  const complete = async item => {
+    await persist(
+      (items || []).map(i => (i.id === item.id ? { ...i, completed: true, completedAt: Date.now() } : i))
+    )
+    celebrate({ name: item.name, tier: null })
+    host.notify({ kind: 'success', message: `Custom achievement: ${item.name}` })
+  }
+
+  return { items: items || [], add, remove, complete }
+}
+
+function CustomTab() {
+  const { items, add, remove, complete } = useCustomAchievements()
+  const [adding, setAdding] = useState(false)
+  const [name, setName] = useState('')
+  const [desc, setDesc] = useState('')
+
+  const submitAdd = async () => {
+    await add(name, desc)
+    setName('')
+    setDesc('')
+    setAdding(false)
+  }
+
+  return jsxs('div', {
+    className: 'flex h-full min-h-0 flex-col overflow-y-auto p-6',
+    children: [
+      jsxs('div', {
+        className: 'mb-4 flex items-center justify-between gap-3',
+        children: [
+          jsx('div', {
+            className: 'text-sm text-(--ui-text-tertiary)',
+            children: `Your own badges (${items.length}) — make Hermes reward the things you care about.`
+          }),
+          jsx(Button, {
+            variant: 'secondary',
+            size: 'sm',
+            onClick: () => setAdding(a => !a),
+            children: adding ? 'Cancel' : 'Add custom'
+          })
+        ]
+      }),
+      adding
+        ? jsxs('div', {
+            className: 'mb-4 flex flex-col gap-2 rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) p-4',
+            children: [
+              jsx('input', {
+                className:
+                  'rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-primary) px-2.5 py-1.5 text-sm outline-none focus:border-(--ui-accent)',
+                placeholder: 'Achievement name, e.g. Posted 10 days straight',
+                value: name,
+                onChange: e => setName(e.target.value),
+                onKeyDown: e => {
+                  if (e.key === 'Enter') submitAdd()
+                }
+              }),
+              jsx('input', {
+                className:
+                  'rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-primary) px-2.5 py-1.5 text-sm outline-none focus:border-(--ui-accent)',
+                placeholder: 'Description (optional)',
+                value: desc,
+                onChange: e => setDesc(e.target.value),
+                onKeyDown: e => {
+                  if (e.key === 'Enter') submitAdd()
+                }
+              }),
+              jsx('div', {
+                className: 'flex justify-end',
+                children: jsx(Button, { variant: 'primary', size: 'sm', onClick: submitAdd, children: 'Add' })
+              })
+            ]
+          })
+        : null,
+      items.length === 0
+        ? jsx(EmptyState, {
+            title: 'No custom achievements',
+            description: 'Define your own badges and celebrate what matters to you.'
+          })
+        : jsxs('div', {
+            className: 'grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3',
+            children: items.map(item =>
+              jsxs('div', {
+                key: item.id,
+                className: cn(
+                  'flex flex-col rounded-lg border p-4',
+                  item.completed
+                    ? 'border-(--ui-stroke-strong) bg-(--ui-bg-tertiary)'
+                    : 'border-(--ui-stroke-secondary) bg-(--ui-bg-secondary)'
+                ),
+                children: [
+                  jsxs('div', {
+                    className: 'flex items-start justify-between gap-2',
+                    children: [
+                      jsxs('div', {
+                        className: 'flex min-w-0 items-center gap-2',
+                        children: [
+                          jsx(Codicon, {
+                            name: 'sparkle',
+                            className: cn('shrink-0', item.completed ? 'text-(--ui-accent)' : 'text-(--ui-text-tertiary)')
+                          }),
+                          jsx('span', { className: 'truncate text-sm font-medium', children: item.name })
+                        ]
+                      }),
+                      jsx(Badge, {
+                        variant: 'outline',
+                        className: 'shrink-0 text-[0.6875rem] text-(--ui-text-tertiary)',
+                        children: 'Custom'
+                      })
+                    ]
+                  }),
+                  item.description
+                    ? jsx('p', {
+                        className: 'mt-2 line-clamp-2 text-xs leading-relaxed text-(--ui-text-tertiary)',
+                        children: item.description
+                      })
+                    : null,
+                  jsxs('div', {
+                    className: 'mt-3 flex items-center justify-between gap-2',
+                    children: [
+                      jsx('span', {
+                        className: 'text-[0.6875rem] text-(--ui-text-tertiary)',
+                        children: item.completed ? 'Done' : 'Not done yet'
+                      }),
+                      jsxs('div', {
+                        className: 'flex items-center gap-1.5',
+                        children: [
+                          !item.completed
+                            ? jsx(Button, {
+                                variant: 'secondary',
+                                size: 'sm',
+                                onClick: () => complete(item),
+                                children: 'Mark done'
+                              })
+                            : null,
+                          jsx('button', {
+                            type: 'button',
+                            onClick: () => remove(item.id),
+                            className:
+                              'inline-flex items-center rounded-md border border-(--ui-stroke-secondary) px-1.5 py-0.5 text-[0.6875rem] text-(--ui-text-tertiary) transition-colors hover:text-(--ui-text-primary)',
+                            children: 'Delete'
+                          })
+                        ]
+                      })
+                    ]
+                  })
+                ]
+              })
+            )
+          })
+    ]
+  })
+}
+
+// ── History timeline ────────────────────────────────────────────────────────
+
+function HistoryTab() {
+  const { data, isLoading, isError, error, refetch } = useQuery({
+    queryKey: ['hermes-achievements', 'recent'],
+    queryFn: () => rest('/recent-unlocks'),
+    refetchInterval: 120_000
+  })
+
+  if (isLoading) {
+    return jsx('div', {
+      className: 'flex h-full flex-col gap-3 overflow-y-auto p-6',
+      children: Array.from({ length: 8 }, () => jsx(Skeleton, { className: 'h-12 w-full rounded-lg' }))
+    })
+  }
+
+  if (isError || !data) {
+    return jsx(ErrorState, {
+      title: 'Could not load unlock history',
+      description: `${error?.message ?? 'Unknown error'}`,
+      children: jsx(Button, { variant: 'secondary', onClick: () => refetch(), children: 'Retry' })
+    })
+  }
+
+  const items = Array.isArray(data) ? data : []
+
+  if (items.length === 0) {
+    return jsx(EmptyState, {
+      title: 'Nothing unlocked yet',
+      description: 'Your unlock timeline will appear here.'
+    })
+  }
+
+  return jsx('div', {
+    className: 'flex-1 overflow-y-auto p-6',
+    children: jsx('ol', {
+      className: 'relative space-y-4 border-l border-(--ui-stroke-secondary) pl-5',
+      children: items.map(a =>
+        jsxs('li', {
+          key: a.id,
+          className: 'relative',
+          children: [
+            jsx('span', {
+              className:
+                'absolute -left-[26px] top-1 h-2.5 w-2.5 rounded-full bg-(--ui-accent) ring-4 ring-(--ui-bg-primary)'
+            }),
+            jsxs('div', {
+              className: 'flex flex-wrap items-center gap-2',
+              children: [
+                jsx('span', { className: 'text-sm font-medium', children: a.name }),
+                a.tier
+                  ? jsx(Badge, {
+                      variant: 'outline',
+                      className: cn('text-[0.6875rem]', tierBadgeClass(a.tier)),
+                      children: a.tier
+                    })
+                  : null,
+                jsx('span', {
+                  className: 'text-[0.6875rem] text-(--ui-text-tertiary)',
+                  children: a.unlocked_at ? relativeTime(a.unlocked_at * 1000) : ''
+                })
+              ]
+            }),
+            a.evidence && a.evidence.title
+              ? jsx('div', {
+                  className: 'mt-0.5 text-[0.6875rem] text-(--ui-text-quaternary)',
+                  children: 'evidence: ' + a.evidence.title
+                })
+              : null
+          ]
+        })
+      )
+    })
+  })
+}
+
+// ── Settings panel ──────────────────────────────────────────────────────────
+
+function ToggleRow({ label, desc, value, onChange }) {
+  return jsxs('div', {
+    className: 'flex items-center justify-between gap-4 py-2',
+    children: [
+      jsxs('div', {
+        children: [
+          jsx('div', { className: 'text-sm font-medium', children: label }),
+          desc ? jsx('div', { className: 'text-xs text-(--ui-text-tertiary)', children: desc }) : null
+        ]
+      }),
+      jsx('button', {
+        type: 'button',
+        role: 'switch',
+        'aria-checked': value,
+        onClick: () => onChange(!value),
+        className: cn(
+          'relative h-5 w-9 shrink-0 rounded-full transition-colors',
+          value ? 'bg-(--ui-accent)' : 'bg-(--ui-bg-quaternary)'
+        ),
+        children: jsx('span', {
+          className: cn(
+            'absolute top-0.5 h-4 w-4 rounded-full bg-(--ui-text-primary) transition-all',
+            value ? 'left-[18px]' : 'left-0.5'
+          )
+        })
+      })
+    ]
+  })
+}
+
+function SettingsPanel({ open, onClose }) {
+  const [local, setLocal] = useState({ ..._settings })
+
+  if (!open) return null
+
+  const set = (k, v) => {
+    const next = { ...local, [k]: v }
+    setLocal(next)
+    _settings = next
+    try {
+      storageRef.set('settings', next)
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
+  return jsxs('div', {
+    className: 'fixed inset-0 z-[1000] flex items-center justify-center bg-black/60 p-6',
+    onClick: onClose,
+    children: [
+      jsxs('div', {
+        className: 'w-[420px] max-w-full rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-bg-primary) p-5 shadow-2xl',
+        onClick: e => e.stopPropagation(),
+        children: [
+          jsx('div', { className: 'mb-3 text-sm font-semibold', children: 'Celebration settings' }),
+          jsx(ToggleRow, {
+            label: 'Confetti',
+            desc: 'Falling celebration on new unlocks',
+            value: local.confetti,
+            onChange: v => set('confetti', v)
+          }),
+          jsx(ToggleRow, {
+            label: 'Sound',
+            desc: 'Two-tone chime on new unlocks',
+            value: local.sound,
+            onChange: v => set('sound', v)
+          }),
+          jsx(ToggleRow, {
+            label: 'Haptic',
+            desc: 'Tap feedback on new unlocks',
+            value: local.haptic,
+            onChange: v => set('haptic', v)
+          }),
+          jsx('div', {
+            className: 'mt-4 flex justify-end',
+            children: jsx(Button, { variant: 'secondary', size: 'sm', onClick: onClose, children: 'Done' })
+          })
+        ]
+      })
+    ]
+  })
 }
 
 // ── Share card ─────────────────────────────────────────────────────────────
@@ -470,7 +866,7 @@ function ShareCardOverlay({ item, onClose }) {
 
 // ── Header / score strip ────────────────────────────────────────────────────
 
-function ScoreHeader({ data, onRescan, rescinding }) {
+function ScoreHeader({ data, onRescan, rescinding, onOpenSettings }) {
   const { unlocked_count, discovered_count, secret_count, total_count } = data
   const pct = total_count ? Math.round((unlocked_count / total_count) * 100) : 0
 
@@ -512,12 +908,27 @@ function ScoreHeader({ data, onRescan, rescinding }) {
               })
             ]
           }),
-          jsx(Button, {
-            variant: 'secondary',
-            size: 'sm',
-            disabled: rescinding,
-            onClick: onRescan,
-            children: rescinding ? 'Scanning…' : 'Rescan'
+          jsxs('div', {
+            className: 'flex items-center gap-2',
+            children: [
+              jsx('button', {
+                type: 'button',
+                onClick: onOpenSettings,
+                className:
+                  'inline-flex h-7 items-center gap-1 rounded-md border border-(--ui-stroke-secondary) px-2 text-xs text-(--ui-text-tertiary) transition-colors hover:text-(--ui-text-primary)',
+                children: jsxs('span', {
+                  className: 'inline-flex items-center gap-1',
+                  children: [jsx(Codicon, { name: 'settings', size: '0.8rem' }), 'Settings']
+                })
+              }),
+              jsx(Button, {
+                variant: 'secondary',
+                size: 'sm',
+                disabled: rescinding,
+                onClick: onRescan,
+                children: rescinding ? 'Scanning…' : 'Rescan'
+              })
+            ]
           })
         ]
       }),
@@ -640,6 +1051,10 @@ function AchievementCard({ item }) {
   const [shareOpen, setShareOpen] = useState(false)
   const isSecret = item.state === 'secret'
   const pct = item.progress_pct ?? 0
+  const isNew =
+    item.unlocked &&
+    item.unlocked_at &&
+    Date.now() / 1000 - item.unlocked_at < 48 * 3600
 
   return jsxs('div', {
     className: cn(
@@ -669,6 +1084,13 @@ function AchievementCard({ item }) {
           jsxs('div', {
             className: 'flex shrink-0 items-center gap-1.5',
             children: [
+              isNew
+                ? jsx(Badge, {
+                    variant: 'outline',
+                    className: 'shrink-0 text-[0.6875rem] text-(--ui-accent)',
+                    children: 'NEW'
+                  })
+                : null,
               item.tier
                 ? jsx(Badge, {
                     variant: 'outline',
@@ -761,7 +1183,10 @@ function AchievementCard({ item }) {
 
 function AchievementsPage() {
   const [filter, setFilter] = useState('all')
+  const [q, setQ] = useState('')
+  const [sort, setSort] = useState('progress')
   const [rescinding, setRescinding] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['hermes-achievements', 'all'],
@@ -800,6 +1225,16 @@ function AchievementsPage() {
 
   const items = data.achievements || []
   const shown = items.filter(a => filter === 'all' || a.state === filter)
+  const query = q.trim().toLowerCase()
+  const filtered = query
+    ? shown.filter(a => `${a.name} ${a.description || ''}`.toLowerCase().includes(query))
+    : shown
+  const sorted = [...filtered].sort((a, b) => {
+    if (sort === 'name') return (a.name || '').localeCompare(b.name || '')
+    if (sort === 'tier') return tierIndex(b.tier) - tierIndex(a.tier) || (b.progress_pct || 0) - (a.progress_pct || 0)
+    if (a.unlocked !== b.unlocked) return a.unlocked ? 1 : -1
+    return (b.progress_pct || 0) - (a.progress_pct || 0)
+  })
   const nextUp = items
     .filter(a => !a.unlocked && a.state !== 'secret' && (a.progress_pct ?? 0) > 0)
     .sort((x, y) => (y.progress_pct ?? 0) - (x.progress_pct ?? 0))
@@ -808,43 +1243,92 @@ function AchievementsPage() {
   return jsxs('div', {
     className: 'flex h-full min-h-0 flex-col',
     children: [
-      jsx(ScoreHeader, { data, onRescan: rescan, rescinding }),
-      jsx(SessionBadges, {}),
-      jsx(NextUpStrip, { items: nextUp }),
+      jsx(ScoreHeader, { data, onRescan: rescan, rescinding, onOpenSettings: () => setSettingsOpen(true) }),
+      filter !== 'history' && filter !== 'custom' ? jsx(SessionBadges, {}) : null,
+      filter === 'all' ? jsx(NextUpStrip, { items: nextUp }) : null,
       jsxs('div', {
-        className: 'flex items-center gap-1 border-b border-(--ui-stroke-secondary) px-6 py-2',
-        children: FILTERS.map(f => {
-          const count =
-            f === 'all'
-              ? data.total_count
-              : f === 'unlocked'
-                ? data.unlocked_count
-                : f === 'discovered'
-                  ? data.discovered_count
-                  : data.secret_count
-          return jsx('button', {
-            key: f,
-            className: cn(
-              'rounded-md px-2.5 py-1 text-xs capitalize transition-colors',
-              filter === f
-                ? 'bg-(--ui-bg-quaternary) text-(--ui-text-primary)'
-                : 'text-(--ui-text-tertiary) hover:text-(--ui-text-primary)'
-            ),
-            type: 'button',
-            onClick: () => setFilter(f),
-            children: `${f} (${count})`
-          })
-        })
+        className: 'flex flex-wrap items-center gap-2 border-b border-(--ui-stroke-secondary) px-6 py-2',
+        children: [
+          jsxs('div', {
+            className: 'flex items-center gap-1',
+            children: FILTERS.map(f => {
+              const count =
+                f === 'all'
+                  ? data.total_count
+                  : f === 'unlocked'
+                    ? data.unlocked_count
+                    : f === 'discovered'
+                      ? data.discovered_count
+                      : f === 'secret'
+                        ? data.secret_count
+                        : null
+              return jsx('button', {
+                key: f,
+                className: cn(
+                  'rounded-md px-2.5 py-1 text-xs capitalize transition-colors',
+                  filter === f
+                    ? 'bg-(--ui-bg-quaternary) text-(--ui-text-primary)'
+                    : 'text-(--ui-text-tertiary) hover:text-(--ui-text-primary)'
+                ),
+                type: 'button',
+                onClick: () => setFilter(f),
+                children: count === null ? f : `${f} (${count})`
+              })
+            })
+          }),
+          filter !== 'history' && filter !== 'custom'
+            ? jsxs('div', {
+                className: 'ml-auto flex items-center gap-2',
+                children: [
+                  jsx('input', {
+                    className:
+                      'w-44 rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-2 py-1 text-xs outline-none focus:border-(--ui-accent)',
+                    placeholder: 'Search…',
+                    value: q,
+                    onChange: e => setQ(e.target.value)
+                  }),
+                  jsxs('div', {
+                    className: 'flex items-center gap-1',
+                    children: [
+                      ['progress', 'Closest'],
+                      ['tier', 'Tier'],
+                      ['name', 'Name']
+                    ].map(([k, label]) =>
+                      jsx('button', {
+                        key: k,
+                        className: cn(
+                          'rounded-md px-2 py-1 text-xs transition-colors',
+                          sort === k
+                            ? 'bg-(--ui-bg-quaternary) text-(--ui-text-primary)'
+                            : 'text-(--ui-text-tertiary) hover:text-(--ui-text-primary)'
+                        ),
+                        type: 'button',
+                        onClick: () => setSort(k),
+                        children: label
+                      })
+                    )
+                  })
+                ]
+              })
+            : null
+        ]
       }),
-      shown.length === 0
-        ? jsx(EmptyState, {
-            title: 'No achievements here',
-            description: 'Nothing in this state yet — keep using Hermes.'
-          })
-        : jsx('div', {
-            className: 'grid flex-1 auto-rows-min grid-cols-1 gap-4 overflow-y-auto p-6 sm:grid-cols-2 lg:grid-cols-3',
-            children: shown.map(a => jsx(AchievementCard, { key: a.id, item: a }))
-          })
+      filter === 'history'
+        ? jsx(HistoryTab, {})
+        : filter === 'custom'
+          ? jsx(CustomTab, {})
+          : sorted.length === 0
+            ? jsx(EmptyState, {
+                title: 'No achievements here',
+                description: query
+                  ? `Nothing matches "${q}". Try a different search.`
+                  : 'Nothing in this state yet — keep using Hermes.'
+              })
+            : jsx('div', {
+                className: 'grid flex-1 auto-rows-min grid-cols-1 gap-4 overflow-y-auto p-6 sm:grid-cols-2 lg:grid-cols-3',
+                children: sorted.map(a => jsx(AchievementCard, { key: a.id, item: a }))
+              }),
+      jsx(SettingsPanel, { open: settingsOpen, onClose: () => setSettingsOpen(false) })
     ]
   })
 }
@@ -860,8 +1344,16 @@ function ScoreChip() {
 
   if (!data || !data.unlocked_count) return null
 
+  const next = (data.achievements || [])
+    .filter(a => !a.unlocked && a.state !== 'secret' && (a.progress_pct ?? 0) > 0)
+    .sort((x, y) => (y.progress_pct ?? 0) - (x.progress_pct ?? 0))[0]
+
+  const label = next
+    ? `Achievements: ${data.unlocked_count}/${data.total_count} · Next: ${next.name} ${next.progress_pct}%`
+    : `Achievements: ${data.unlocked_count}/${data.total_count} — all unlocked!`
+
   return jsx(Tip, {
-    label: `Achievements: ${data.unlocked_count}/${data.total_count} unlocked`,
+    label,
     children: jsx('button', {
       className: cn(
         'inline-flex h-full items-center gap-1 rounded-none px-1.5 text-[0.6875rem] tabular-nums transition-colors',
@@ -889,10 +1381,18 @@ export default {
   id: ID,
   name: 'Achievements',
   description:
-    'Hermes achievement badges — collectible tiers from real session history. Read-only dashboard backed by the hermes-achievements plugin API, with unlock notifications, confetti celebrations, next-up tracking, per-session context, and share cards.',
+    'Hermes achievement badges — collectible tiers from real session history. Read-only dashboard backed by the hermes-achievements plugin API, with unlock notifications, confetti celebrations, unlock history, custom achievements, and share cards.',
   defaultEnabled: true,
   register(ctx) {
     rest = ctx.rest
+    storageRef = ctx.storage
+    try {
+      ctx.storage.get('settings').then(s => {
+        if (s) _settings = { ...DEFAULT_SETTINGS, ...s }
+      })
+    } catch (e) {
+      /* ignore */
+    }
     startUnlockWatcher(ctx)
 
     ctx.registerMany([

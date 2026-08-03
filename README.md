@@ -11,10 +11,16 @@ An enhanced fork of [asimons81/hermes-desktop-achievements](https://github.com/a
 - **Unlock notifications** — toast, haptic, a chime, and a confetti burst in your theme colors plus the badge's tier color, no page visit required
 - **Score header** — unlocked/total, discovered/secret counts, scan freshness, one-click **Rescan**
 - **Next up strip** — the locked achievements closest to unlocking, with progress bars and next-tier thresholds
+- **Unlock history** — a chronological timeline of every unlock with dates and evidence sessions
+- **Custom achievements** — define your own personal badges, mark them done, get the same celebration
+- **Settings panel** — toggles for confetti, sound, and haptic, persisted across restarts
+- **Milestone celebrations** — a bigger confetti party at every 10 unlocks
 - **Per-session context** — badges earned in the active session, right on the page
 - **Share cards** — 1200×630 canvas PNG export for any unlocked badge, ready to post
-- **Filter tabs** — all / unlocked / discovered / secret with live counts
-- **Statusbar chip** — live score in the bottom-right; click to open
+- **Filter tabs** — all / unlocked / discovered / secret / history / custom with live counts
+- **Search and sort** — filter by name, sort by closest, tier, or name
+- **NEW freshness tag** — badges unlocked in the last 48 hours are marked NEW
+- **Statusbar chip** — live score plus the closest next-up achievement in the tooltip; click to open
 - **Command palette** — ⌘K → "Achievements: Open"
 
 ## Install
