@@ -4,6 +4,8 @@ Achievements, right inside the Hermes desktop app, with unlock notifications.
 
 An enhanced fork of [asimons81/hermes-desktop-achievements](https://github.com/asimons81/hermes-desktop-achievements), backed by the `hermes-achievements` dashboard plugin that ships with Hermes Agent.
 
+![Achievements page](docs/achievements-page.png)
+
 ## Features
 
 - **Unlock notifications** — toast, haptic, and a chime the moment a new badge lands, no page visit required
