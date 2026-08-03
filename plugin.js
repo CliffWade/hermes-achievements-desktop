@@ -5,14 +5,20 @@
  * Extensions on top of the original:
  *   - Unlock notifications: toast + haptic + chime + theme/tier-colored
  *     confetti the moment a new badge lands (poll diff against a persisted
- *     known set), gated by user settings.
+ *     known set), gated by user settings, announced to a Discord webhook.
+ *   - Tier-specific sounds: Copper/Silver chime, Gold+ and milestones get a
+ *     five-note fanfare.
  *   - Unlock history timeline (recent unlocks with dates and evidence).
  *   - Custom achievements: user-defined personal badges, stored in plugin
  *     storage, celebrated on completion.
- *   - Settings panel: toggles for confetti, sound, haptic.
+ *   - Settings panel: toggles for confetti, sound, haptic, and a Discord
+ *     webhook URL.
  *   - "NEW" freshness tag on unlocks from the last 48 hours.
  *   - Search and sort on the grid.
+ *   - Weekly mini-stats (unlocks this week, busiest day, tier counts).
  *   - Milestone celebrations at every 10 unlocks.
+ *   - Export badges to Markdown or JSON.
+ *   - Replay the celebration from any unlocked badge or history entry.
  *   - Smarter statusbar chip tooltip (closest next-up achievement).
  *   - "Next up" strip, per-session context, share cards.
  *
@@ -55,7 +61,7 @@ const TIER_ORDER = ['Copper', 'Silver', 'Gold', 'Diamond', 'Olympian']
 const FILTERS = ['all', 'unlocked', 'discovered', 'secret', 'history', 'custom']
 const UNLOCK_POLL_MS = 15_000
 
-const DEFAULT_SETTINGS = { confetti: true, sound: true, haptic: true }
+const DEFAULT_SETTINGS = { confetti: true, sound: true, haptic: true, discordWebhook: '' }
 let _settings = { ...DEFAULT_SETTINGS }
 
 function tierIndex(tier) {
@@ -106,6 +112,43 @@ function playChime() {
     })
   } catch (e) {
     /* audio unavailable — ignore */
+  }
+}
+
+function playFanfare() {
+  try {
+    _audioCtx = _audioCtx || new (window.AudioContext || window.webkitAudioContext)()
+    const ctx = _audioCtx
+    const now = ctx.currentTime
+    ;[523.25, 659.25, 783.99, 1046.5, 1318.5].forEach((freq, i) => {
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.type = 'triangle'
+      osc.frequency.value = freq
+      const t = now + i * 0.14
+      gain.gain.setValueAtTime(0.0001, t)
+      gain.gain.exponentialRampToValueAtTime(0.3, t + 0.03)
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.2)
+      osc.connect(gain).connect(ctx.destination)
+      osc.start(t)
+      osc.stop(t + 0.22)
+    })
+  } catch (e) {
+    /* audio unavailable — ignore */
+  }
+}
+
+function postToWebhook(text) {
+  const url = _settings.discordWebhook
+  if (!url || !/^https:\/\/(discord\.com|discordapp\.com)\/api\/webhooks\//.test(url)) return
+  try {
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: text })
+    }).catch(() => {})
+  } catch (e) {
+    /* ignore */
   }
 }
 
@@ -268,7 +311,12 @@ function celebrate(a, opts) {
       /* ignore */
     }
   }
-  if (s.sound) playChime()
+  if (s.sound) {
+    const isMilestone = !!(opts && opts.milestone)
+    const tier = a && a.tier
+    if (isMilestone || tier === 'Gold' || tier === 'Diamond' || tier === 'Olympian') playFanfare()
+    else playChime()
+  }
   if (s.confetti) spawnConfetti(a, opts)
 }
 
@@ -283,6 +331,7 @@ function notifyUnlock(a) {
   celebrate(a)
   const tier = a.tier ? ` [${a.tier}]` : ''
   host.notify({ kind: 'success', message: `Achievement unlocked: ${a.name}${tier}` })
+  postToWebhook(`🏆 Achievement unlocked: ${a.name}${tier}`)
 }
 
 async function refreshUnlocks(ctx) {
@@ -328,6 +377,7 @@ async function refreshUnlocks(ctx) {
     if (_lastTotal !== null && totalNow > _lastTotal && totalNow % 10 === 0) {
       celebrate({ name: `${totalNow} achievements`, tier: null }, { milestone: true })
       host.notify({ kind: 'success', message: `Milestone: ${totalNow} achievements unlocked!` })
+      postToWebhook(`🎉 Milestone: ${totalNow} achievements unlocked!`)
     }
     _lastTotal = totalNow
 
@@ -610,6 +660,13 @@ function HistoryTab() {
                 jsx('span', {
                   className: 'text-[0.6875rem] text-(--ui-text-tertiary)',
                   children: a.unlocked_at ? relativeTime(a.unlocked_at * 1000) : ''
+                }),
+                jsx('button', {
+                  type: 'button',
+                  onClick: () => celebrate({ name: a.name, tier: a.tier }, {}),
+                  className:
+                    'text-[0.6875rem] text-(--ui-text-tertiary) underline decoration-dotted underline-offset-2 hover:text-(--ui-text-primary)',
+                  children: 'replay'
                 })
               ]
             }),
@@ -701,12 +758,152 @@ function SettingsPanel({ open, onClose }) {
             value: local.haptic,
             onChange: v => set('haptic', v)
           }),
+          jsxs('div', {
+            className: 'border-t border-(--ui-stroke-secondary) pt-3 mt-1',
+            children: [
+              jsx('label', {
+                className: 'block text-xs font-medium text-(--ui-text-secondary)',
+                children: 'Discord webhook'
+              }),
+              jsx('input', {
+                className:
+                  'mt-1.5 w-full rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-2.5 py-1.5 text-xs outline-none focus:border-(--ui-accent)',
+                placeholder: 'https://discord.com/api/webhooks/…',
+                value: local.discordWebhook || '',
+                onChange: e => set('discordWebhook', e.target.value)
+              }),
+              jsx('div', {
+                className: 'mt-1 text-[0.6875rem] text-(--ui-text-quaternary)',
+                children: 'Unlock announcements post here. Create one in Discord: channel settings → Integrations → Webhooks.'
+              })
+            ]
+          }),
           jsx('div', {
             className: 'mt-4 flex justify-end',
             children: jsx(Button, { variant: 'secondary', size: 'sm', onClick: onClose, children: 'Done' })
           })
         ]
       })
+    ]
+  })
+}
+
+// ── Export ─────────────────────────────────────────────────────────────────
+
+function downloadText(filename, text) {
+  try {
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    /* ignore */
+  }
+}
+
+function buildMarkdown(data) {
+  const items = data.achievements || []
+  const unlocked = items
+    .filter(a => a.unlocked)
+    .sort((a, b) => (a.unlocked_at || 0) - (b.unlocked_at || 0))
+  const inProgress = items
+    .filter(a => !a.unlocked && a.state !== 'secret')
+    .sort((a, b) => (b.progress_pct || 0) - (a.progress_pct || 0))
+  const lines = []
+  lines.push('# Hermes Achievements')
+  lines.push('')
+  lines.push(`${data.unlocked_count}/${data.total_count} unlocked · generated ${new Date().toLocaleDateString()}`)
+  lines.push('')
+  lines.push(`## Unlocked (${unlocked.length})`)
+  for (const a of unlocked) {
+    const tier = a.tier ? ` [${a.tier}]` : ''
+    const when = a.unlocked_at ? new Date(a.unlocked_at * 1000).toLocaleDateString() : ''
+    lines.push(`- ${a.name}${tier} — ${when}`)
+  }
+  lines.push('')
+  lines.push(`## In progress (${inProgress.length})`)
+  for (const a of inProgress.slice(0, 30)) {
+    lines.push(`- ${a.name} — ${a.progress_pct ?? 0}%`)
+  }
+  lines.push('')
+  lines.push(`Secrets: ${data.secret_count}`)
+  return lines.join('\n')
+}
+
+function buildJson(data) {
+  return JSON.stringify(
+    {
+      generated_at: new Date().toISOString(),
+      counts: {
+        unlocked: data.unlocked_count,
+        discovered: data.discovered_count,
+        secret: data.secret_count,
+        total: data.total_count
+      },
+      achievements: (data.achievements || []).map(a => ({
+        id: a.id,
+        name: a.name,
+        description: a.description,
+        state: a.state,
+        unlocked: !!a.unlocked,
+        tier: a.tier || null,
+        progress_pct: a.progress_pct ?? 0,
+        unlocked_at: a.unlocked_at || null,
+        evidence: a.evidence || null
+      }))
+    },
+    null,
+    2
+  )
+}
+
+function ExportMenu({ data }) {
+  const [open, setOpen] = useState(false)
+  const itemClass =
+    'block w-full px-3 py-2 text-left text-xs hover:bg-(--ui-bg-quaternary)'
+
+  return jsxs('div', {
+    className: 'relative',
+    children: [
+      jsx('button', {
+        type: 'button',
+        onClick: () => setOpen(o => !o),
+        className:
+          'inline-flex h-7 items-center gap-1 rounded-md border border-(--ui-stroke-secondary) px-2 text-xs text-(--ui-text-tertiary) transition-colors hover:text-(--ui-text-primary)',
+        children: jsxs('span', {
+          className: 'inline-flex items-center gap-1',
+          children: [jsx(Codicon, { name: 'download', size: '0.8rem' }), 'Export']
+        })
+      }),
+      open
+        ? jsxs('div', {
+            className:
+              'absolute right-0 top-full z-20 mt-1 w-36 overflow-hidden rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-primary) shadow-xl',
+            children: [
+              jsx('button', {
+                type: 'button',
+                onClick: () => {
+                  downloadText('hermes-achievements.md', buildMarkdown(data))
+                  setOpen(false)
+                },
+                className: itemClass,
+                children: 'Markdown'
+              }),
+              jsx('button', {
+                type: 'button',
+                onClick: () => {
+                  downloadText('hermes-achievements.json', buildJson(data))
+                  setOpen(false)
+                },
+                className: itemClass,
+                children: 'JSON'
+              })
+            ]
+          })
+        : null
     ]
   })
 }
@@ -864,6 +1061,40 @@ function ShareCardOverlay({ item, onClose }) {
   })
 }
 
+// ── Mini stats ─────────────────────────────────────────────────────────────
+
+function MiniStats({ data }) {
+  const items = data.achievements || []
+  const now = Date.now() / 1000
+  const week = 7 * 24 * 3600
+  const unlocked = items.filter(a => a.unlocked)
+  const thisWeek = unlocked.filter(a => a.unlocked_at && now - a.unlocked_at < week).length
+  const byTier = {}
+  for (const a of unlocked) {
+    if (a.tier) byTier[a.tier] = (byTier[a.tier] || 0) + 1
+  }
+  const dayCount = {}
+  for (const a of unlocked) {
+    if (!a.unlocked_at) continue
+    const d = new Date(a.unlocked_at * 1000).toLocaleDateString('en-US', { weekday: 'long' })
+    dayCount[d] = (dayCount[d] || 0) + 1
+  }
+  const busiest = Object.entries(dayCount).sort((a, b) => b[1] - a[1])[0]
+  const tierLine = TIER_ORDER.filter(t => byTier[t])
+    .map(t => `${byTier[t]} ${t}`)
+    .join(' · ')
+
+  return jsxs('div', {
+    className:
+      'flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-(--ui-stroke-secondary) px-6 py-2 text-[0.6875rem] text-(--ui-text-tertiary)',
+    children: [
+      jsx('span', { children: `${thisWeek} unlocked this week` }),
+      busiest ? jsx('span', { children: `busiest day: ${busiest[0]}` }) : null,
+      tierLine ? jsx('span', { children: tierLine }) : null
+    ]
+  })
+}
+
 // ── Header / score strip ────────────────────────────────────────────────────
 
 function ScoreHeader({ data, onRescan, rescinding, onOpenSettings }) {
@@ -911,6 +1142,7 @@ function ScoreHeader({ data, onRescan, rescinding, onOpenSettings }) {
           jsxs('div', {
             className: 'flex items-center gap-2',
             children: [
+              jsx(ExportMenu, { data }),
               jsx('button', {
                 type: 'button',
                 onClick: onOpenSettings,
@@ -1105,15 +1337,30 @@ function AchievementCard({ item }) {
                     })
                   : null,
               item.unlocked && !isSecret
-                ? jsx('button', {
-                    type: 'button',
-                    onClick: () => setShareOpen(true),
-                    className:
-                      'inline-flex items-center gap-1 rounded-md border border-(--ui-stroke-secondary) px-1.5 py-0.5 text-[0.6875rem] text-(--ui-text-tertiary) transition-colors hover:text-(--ui-text-primary)',
-                    children: jsxs('span', {
-                      className: 'inline-flex items-center gap-1',
-                      children: [jsx(Codicon, { name: 'share', size: '0.75rem' }), 'Share']
-                    })
+                ? jsxs('div', {
+                    className: 'flex shrink-0 items-center gap-1.5',
+                    children: [
+                      jsx('button', {
+                        type: 'button',
+                        onClick: () => celebrate({ name: item.name, tier: item.tier }, {}),
+                        className:
+                          'inline-flex items-center gap-1 rounded-md border border-(--ui-stroke-secondary) px-1.5 py-0.5 text-[0.6875rem] text-(--ui-text-tertiary) transition-colors hover:text-(--ui-text-primary)',
+                        children: jsxs('span', {
+                          className: 'inline-flex items-center gap-1',
+                          children: [jsx(Codicon, { name: 'play', size: '0.75rem' }), 'Replay']
+                        })
+                      }),
+                      jsx('button', {
+                        type: 'button',
+                        onClick: () => setShareOpen(true),
+                        className:
+                          'inline-flex items-center gap-1 rounded-md border border-(--ui-stroke-secondary) px-1.5 py-0.5 text-[0.6875rem] text-(--ui-text-tertiary) transition-colors hover:text-(--ui-text-primary)',
+                        children: jsxs('span', {
+                          className: 'inline-flex items-center gap-1',
+                          children: [jsx(Codicon, { name: 'share', size: '0.75rem' }), 'Share']
+                        })
+                      })
+                    ]
                   })
                 : null
             ]
@@ -1244,6 +1491,7 @@ function AchievementsPage() {
     className: 'flex h-full min-h-0 flex-col',
     children: [
       jsx(ScoreHeader, { data, onRescan: rescan, rescinding, onOpenSettings: () => setSettingsOpen(true) }),
+      filter !== 'history' && filter !== 'custom' ? jsx(MiniStats, { data }) : null,
       filter !== 'history' && filter !== 'custom' ? jsx(SessionBadges, {}) : null,
       filter === 'all' ? jsx(NextUpStrip, { items: nextUp }) : null,
       jsxs('div', {

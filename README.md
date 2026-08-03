@@ -9,12 +9,17 @@ An enhanced fork of [asimons81/hermes-desktop-achievements](https://github.com/a
 ## Features
 
 - **Unlock notifications** — toast, haptic, a chime, and a confetti burst in your theme colors plus the badge's tier color, no page visit required
+- **Discord announcements** — optional webhook posts every unlock and milestone to your server
+- **Tier-specific sounds** — Copper/Silver get the chime, Gold and up and milestones get a five-note fanfare
 - **Score header** — unlocked/total, discovered/secret counts, scan freshness, one-click **Rescan**
 - **Next up strip** — the locked achievements closest to unlocking, with progress bars and next-tier thresholds
 - **Unlock history** — a chronological timeline of every unlock with dates and evidence sessions
 - **Custom achievements** — define your own personal badges, mark them done, get the same celebration
-- **Settings panel** — toggles for confetti, sound, and haptic, persisted across restarts
+- **Settings panel** — toggles for confetti, sound, haptic, and the Discord webhook URL, persisted across restarts
 - **Milestone celebrations** — a bigger confetti party at every 10 unlocks
+- **Weekly mini-stats** — unlocks this week, busiest day, tier counts
+- **Export badges** — download the full list as Markdown or JSON
+- **Replay celebrations** — fire the confetti again from any unlocked badge or history entry
 - **Per-session context** — badges earned in the active session, right on the page
 - **Share cards** — 1200×630 canvas PNG export for any unlocked badge, ready to post
 - **Filter tabs** — all / unlocked / discovered / secret / history / custom with live counts
