@@ -3,8 +3,9 @@
  *
  * Fork of asimons81/hermes-desktop-achievements (MIT) by Tony Simons.
  * Extensions on top of the original:
- *   - Unlock notifications: toast + haptic + chime + confetti the moment a
- *     new badge lands (poll diff against a persisted known set).
+ *   - Unlock notifications: toast + haptic + chime + theme/tier-colored
+ *     confetti the moment a new badge lands (poll diff against a persisted
+ *     known set).
  *   - "Next up" strip: the locked achievements closest to unlocking.
  *   - Per-session context: badges earned in the active session.
  *   - Share cards: 1200×630 canvas PNG export per unlocked badge.
@@ -119,7 +120,28 @@ function lighten(hex, amt) {
 let _confettiCanvas = null
 let _confettiRaf = null
 
-function spawnConfetti() {
+const TIER_COLORS = {
+  Copper: '#cd7f32',
+  Silver: '#c0c0c0',
+  Gold: '#ffd700',
+  Diamond: '#a5e8ff',
+  Olympian: '#c084fc'
+}
+
+function drawStar(ctx, cx, cy, spikes, outer, inner) {
+  ctx.beginPath()
+  for (let i = 0; i < spikes * 2; i++) {
+    const r = i % 2 === 0 ? outer : inner
+    const ang = (i * Math.PI) / spikes - Math.PI / 2
+    const x = cx + Math.cos(ang) * r
+    const y = cy + Math.sin(ang) * r
+    if (i === 0) ctx.moveTo(x, y)
+    else ctx.lineTo(x, y)
+  }
+  ctx.closePath()
+}
+
+function spawnConfetti(a) {
   try {
     if (_confettiCanvas) return // one burst at a time
     const canvas = document.createElement('canvas')
@@ -133,32 +155,66 @@ function spawnConfetti() {
     const cs = getComputedStyle(document.body)
     const get = v => cs.getPropertyValue(v).trim() || null
     const accent = get('--ui-accent') || '#7B2D8E'
-    const palette = [
+    const tier = (a && a.tier) || null
+    const tierColor = (tier && TIER_COLORS[tier]) || null
+    // Theme accent family + the achievement's tier color + neutrals.
+    const base = [
       accent,
       lighten(accent, 0.35),
-      lighten(accent, -0.25),
-      get('--ui-text-primary') || '#ffffff',
-      get('--ui-text-secondary') || '#b0b0b0'
+      lighten(accent, -0.25)
     ]
+    if (tierColor) base.push(tierColor, lighten(tierColor, 0.3))
+    base.push(get('--ui-text-primary') || '#ffffff', get('--ui-text-secondary') || '#b0b0b0')
 
     const W = window.innerWidth
     const H = window.innerHeight
-    const parts = Array.from({ length: 150 }, () => ({
-      x: W * (0.15 + Math.random() * 0.7),
-      y: -20 - Math.random() * H * 0.5,
-      w: 6 + Math.random() * 6,
-      h: 10 + Math.random() * 8,
-      vx: (Math.random() - 0.5) * 2.4,
-      vy: 2.2 + Math.random() * 3.6,
-      rot: Math.random() * Math.PI * 2,
-      vr: (Math.random() - 0.5) * 0.25,
-      color: palette[(Math.random() * palette.length) | 0],
-      sway: Math.random() * Math.PI * 2,
-      swaySpeed: 0.02 + Math.random() * 0.04
-    }))
+    const SHAPES = ['rect', 'rect', 'rect', 'circle', 'triangle', 'star']
+    const count = 120 + Math.floor(Math.random() * 80)
+    const wind = (Math.random() - 0.5) * 1.4
+    const parts = Array.from({ length: count }, () => {
+      // Mostly theme/tier colors, sprinkled with random bright hues.
+      const color =
+        Math.random() < 0.25
+          ? `hsl(${Math.floor(Math.random() * 360)}, 85%, 62%)`
+          : base[(Math.random() * base.length) | 0]
+      return {
+        x: W * (0.1 + Math.random() * 0.8),
+        y: -20 - Math.random() * H * 0.5,
+        w: 5 + Math.random() * 7,
+        h: 9 + Math.random() * 9,
+        vx: (Math.random() - 0.5) * 2.6 + wind,
+        vy: 2.0 + Math.random() * 3.8,
+        rot: Math.random() * Math.PI * 2,
+        vr: (Math.random() - 0.5) * 0.3,
+        color,
+        shape: SHAPES[(Math.random() * SHAPES.length) | 0],
+        sway: Math.random() * Math.PI * 2,
+        swaySpeed: 0.02 + Math.random() * 0.05
+      }
+    })
 
     const start = performance.now()
     const DURATION = 3200
+
+    const drawShape = p => {
+      if (p.shape === 'circle') {
+        ctx.beginPath()
+        ctx.arc(0, 0, p.w / 2, 0, Math.PI * 2)
+        ctx.fill()
+      } else if (p.shape === 'triangle') {
+        ctx.beginPath()
+        ctx.moveTo(0, -p.h / 2)
+        ctx.lineTo(p.w / 2, p.h / 2)
+        ctx.lineTo(-p.w / 2, p.h / 2)
+        ctx.closePath()
+        ctx.fill()
+      } else if (p.shape === 'star') {
+        drawStar(ctx, 0, 0, 5, p.w / 1.4, p.w / 3.1)
+        ctx.fill()
+      } else {
+        ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h)
+      }
+    }
 
     const tick = now => {
       const elapsed = now - start
@@ -167,14 +223,14 @@ function spawnConfetti() {
       ctx.globalAlpha = 1 - t * t
       for (const p of parts) {
         p.sway += p.swaySpeed
-        p.x += p.vx + Math.sin(p.sway) * 0.8
+        p.x += p.vx + Math.sin(p.sway) * 0.9
         p.y += p.vy
         p.rot += p.vr
         ctx.save()
         ctx.translate(p.x, p.y)
         ctx.rotate(p.rot)
         ctx.fillStyle = p.color
-        ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h)
+        drawShape(p)
         ctx.restore()
       }
       if (t < 1) {
@@ -201,7 +257,7 @@ function notifyUnlock(a) {
     /* ignore */
   }
   playChime()
-  spawnConfetti()
+  spawnConfetti(a)
   const tier = a.tier ? ` [${a.tier}]` : ''
   host.notify({ kind: 'success', message: `Achievement unlocked: ${a.name}${tier}` })
 }
